@@ -1,0 +1,197 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Simple DoppioJVM Example</title>
+    <script type="text/javascript" src="doppio/browserfs.min.js"></script>
+    <script type="text/javascript" src="doppio/doppio.js"></script>
+    <script type="text/javascript" >
+        var fs = BrowserFS.BFSRequire("fs");
+        var process = BrowserFS.BFSRequire('process');
+        var buffer = BrowserFS.BFSRequire("buffer").Buffer;
+
+        // Upload file functions copied from demo at https://plasma-umass.org/doppio-demo/
+        // Included to demonstrate how to load files into the BrowserFS filesystem.
+        /**
+         * Uploads the specified file via the FileReader interface. Calls the callback
+         * with an optional error if one occurs.
+         */
+        async function uploadFile(f, cb) {
+          var reader = new FileReader();
+          reader.onerror = function (e) {
+            switch (e.target.error.code) {
+              case e.target.error.NOT_FOUND_ERR:
+                return cb("File " + f.name + " not found.");
+              case e.target.error.NOT_READABLE_ERR:
+                return cb("File " + f.name + " is not readable.");
+              case e.target.error.SECURITY_ERR:
+                return cb("Cannot use the FileReader interface. You must launch your browser with --allow-file-access-from-files.");
+            }
+          };
+          reader.onload = async function (e) {
+            fs.writeFile(process.cwd() + '/' + f.name, new buffer(e.target.result), function (err) {
+              if (err) {
+                cb("" + err);
+              }
+              else {
+                cb();
+              }
+            });
+          };
+          reader.readAsArrayBuffer(f);
+        }
+        /**
+         * Upload files via the browser's FileReader interface. Triggered when someone
+         * clicks the upload button in the demo.
+         */
+        async function uploadFiles(terminal, ev) {
+          if (typeof FileReader === "undefined" || FileReader === null) {
+            terminal.stderr.write("\nYour browser doesn't support file loading.\nTry using the editor to create files instead.\n");
+            return;
+          }
+          var fileCount = ev.target.files.length, filesUploaded = 0;
+          if (fileCount > 0) {
+            terminal.stdout.write("\nUploading " + fileCount + " files...\n");
+          }
+          var files = ev.target.files;
+          var _loop_1 = async function(i) {
+            var f = files[i];
+            await uploadFile(f, function (e) {
+              filesUploaded++;
+              var str = "[" + filesUploaded + "/" + fileCount + "]: File " + process.cwd() + '/' + f.name + " ";
+              if (e) {
+                str += "could not be saved: " + e + ".\n";
+                terminal.stderr.write(str);
+              }
+              else {
+                str += "successfully saved.\n";
+                terminal.stdout.write(str);
+              }
+              if (filesUploaded === fileCount) {
+                //terminal.prompt();
+              }
+            });
+          };
+          for (var i = 0; i < files.length; i++) {
+            await _loop_1(i);
+          }
+        }
+
+
+        // Wrap in a closure; don't pollute the global namespace.
+        (function() {
+
+          var mfs = new BrowserFS.FileSystem.MountableFileSystem(),
+            fs = BrowserFS.BFSRequire('fs');
+          BrowserFS.initialize(mfs);
+          // Temporary storage.
+          mfs.mount('/tmp', new BrowserFS.FileSystem.InMemory());
+          // 10MB of writable storage
+          // Use BrowserFS's IndexedDB file system for more storage.
+          var home = new BrowserFS.FileSystem.LocalStorage();
+          mfs.mount('/home', home);
+          // The first argument is the filename of the listings file
+          // The second argument is the relative URL to the folder containing the listings file
+          //mfs.mount('/sys', new BrowserFS.FileSystem.XmlHttpRequest('listings.json', '.'));
+
+          // Demonstration of adding file to BrowserFS from a string.
+          // Sample from https://github.com/plasma-umass/doppio/blob/master/docs/examples/example/App.java
+          fs.writeFileSync("/tmp/App.java", `import java.io.*;
+import java.util.Scanner;
+
+class App {
+  public static void main(String[] args) {
+    System.out.println("DoppioJVM now booted!");
+    Scanner stdin = new Scanner(System.in);
+    System.out.println("What is your name?");
+    if (stdin.hasNextLine())
+    {
+        String name = stdin.nextLine();
+        System.out.println("Hello, " + name + "!");
+    }
+  }
+}`);
+
+          function r(n) {
+            mfs.mount("/doppio_home", new BrowserFS.FileSystem.ZipFS(new buffer(n)));
+            // From https://stackoverflow.com/a/28093606
+            if (document.readyState == 'complete') {
+              afterLoad();
+            } else {
+              window.addEventListener('load', function() {
+                afterLoad();
+              });
+            }
+          }
+
+          var t = new XMLHttpRequest();
+          t.open("GET", "doppio_home.zip");
+          t.responseType = "arraybuffer";
+          t.addEventListener("load", function(e) {
+            r(t.response)
+          });
+          t.send();
+        })();
+
+        function afterLoad() {
+          var textarea = document.getElementById('console');
+          process.initializeTTYs();
+          process.chdir('/home');
+
+          document.getElementById('file').addEventListener('change', async function (ev) {
+            await uploadFiles(process, ev);
+          });
+
+          var stdoutBuffer = '';
+          process.stdout.on('data', function(data) {
+            stdoutBuffer += data.toString();
+            var newlineIdx;
+            while ((newlineIdx = stdoutBuffer.indexOf("\n")) > -1) {
+              textarea.value += stdoutBuffer.slice(0, newlineIdx + 1);
+              stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+            }
+          });
+          var stderrBuffer = '';
+          process.stderr.on('data', function(data) {
+            stderrBuffer += data.toString();
+            var newlineIdx;
+            while ((newlineIdx = stderrBuffer.indexOf("\n")) > -1) {
+              textarea.value += stderrBuffer.slice(0, newlineIdx + 1);
+              stderrBuffer = stderrBuffer.slice(newlineIdx + 1);
+            }
+          });
+
+          var stdin = document.getElementById('stdin');
+          document.getElementById('stdinButton').addEventListener('click', function(ev) {
+            ev.preventDefault();
+            process.stdin.write(stdin.value + "\n");
+            stdin.value = '';
+          });
+
+          Doppio.VM.CLI(
+            ['-classpath', '/doppio_home', 'classes.util.Javac', '/tmp/App.java'],
+            {
+              doppioHomePath: '/doppio_home'
+            }, function(exitCode) {
+              if (exitCode === 0) {
+                Doppio.VM.CLI(
+                  ['-classpath', '/tmp', 'App'],
+                  {
+                    doppioHomePath: '/doppio_home'
+                  });
+              }
+            });
+        }
+    </script>
+  </head>
+  <body>
+    <!-- File upload button strategy credit goes davist11: https://gist.github.com/645816 -->
+    <span class="file-wrapper" style='margin: 8px 0 3px 0;float:right;'>
+      <input type="file" name="file" id="file" multiple />
+      <span class="button">Upload Files...</span>
+    </span>
+
+    <textarea id="console" cols="80" rows="30">Loading doppio may take up to a minute, please be patient...
+</textarea><br />
+    <input id="stdin" /><button id="stdinButton">Send to App</button>
+  </body>
+</html>
